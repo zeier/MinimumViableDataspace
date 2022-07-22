@@ -125,10 +125,12 @@ jobs:
         run: az acr build --registry $ACR_NAME --image mvd/data-dashboard:${{ env.RESOURCES_PREFIX }} .
 
   # Deploy shared dataspace components.
+  # Explicitly running on ubuntu 22.04 as current ubuntu-latest is on 20.04 version which comes with curl version 7.68.0
+  # but to support --retry-all-errors flag at least curl version 7.71.0 is required which is available with ubuntu 22.04
   Deploy-Dataspace:
     needs:
       - Build-Registration-Service
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       app_insights_connection_string: ${{ steps.runterraform.outputs.app_insights_connection_string }}
       registration_service_url: ${{ steps.runterraform.outputs.registration_service_url }}
@@ -169,7 +171,7 @@ jobs:
           subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
       - name: 'Upload tfvars file'
-        run: az storage blob upload --account-name "${{ secrets.TERRAFORM_STATE_STORAGE_ACCOUNT }}" -c "${{ secrets.TERRAFORM_STATE_CONTAINER }}" -f terraform.tfvars -n "${{ env.RESOURCES_PREFIX }}.tfvars" --auth-mode key --overwrite
+        run: az storage blob upload --account-name "${{ secrets.TERRAFORM_STATE_STORAGE_ACCOUNT }}" -c "${{ secrets.TERRAFORM_STATE_CONTAINER }}" -f terraform.tfvars -n "${{ env.RESOURCES_PREFIX }}.tfvars" --auth-mode key
 
       - name: 'Run terraform'
         id: runterraform
@@ -226,17 +228,20 @@ jobs:
       - name: 'Verify Dataspace DID endpoint is available'
         run: curl https://${{ steps.runterraform.outputs.dataspace_did_host }}/.well-known/did.json | jq '.id'
 
+        # Keeping number of retries higher because sometime Azure Container Instance takes longer to run successfully.
       - name: 'Verify deployed Registration Service is healthy'
-        run: curl --retry 6 --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
+        run: curl --retry 20 --retry-all-errors --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
 
   # Deploy dataspace participants in parallel.
+  # Explicitly running on ubuntu 22.04 as current ubuntu-latest is on 20.04 version which comes with curl version 7.68.0
+  # but to support --retry-all-errors flag at least curl version 7.71.0 is required which is available with ubuntu 22.04
   Deploy-Participants:
     needs:
       - Deploy-Dataspace
       - Build-Connector
       - Build-Dashboard
       - Matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       company1_edc_host: ${{ steps.runterraform.outputs.company1_edc_host }}
       company2_edc_host: ${{ steps.runterraform.outputs.company2_edc_host }}
@@ -299,7 +304,7 @@ jobs:
           subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
       - name: 'Upload tfvars file'
-        run: az storage blob upload --account-name "${{ secrets.TERRAFORM_STATE_STORAGE_ACCOUNT }}" -c "${{ secrets.TERRAFORM_STATE_CONTAINER }}" -f terraform.tfvars -n "${{ matrix.participant }}${{ env.RESOURCES_PREFIX }}.tfvars" --auth-mode key --overwrite
+        run: az storage blob upload --account-name "${{ secrets.TERRAFORM_STATE_STORAGE_ACCOUNT }}" -c "${{ secrets.TERRAFORM_STATE_CONTAINER }}" -f terraform.tfvars -n "${{ matrix.participant }}${{ env.RESOURCES_PREFIX }}.tfvars" --auth-mode key
 
       - name: 'Run terraform'
         id: runterraform
@@ -373,8 +378,9 @@ jobs:
       - name: 'Verify did endpoint is available'
         run: curl https://$DID_HOST/.well-known/did.json | jq '.id'
 
-#      - name: 'Verify deployed EDC is healthy'
-#        run: curl --retry 6 --fail http://${EDC_HOST}:8181/api/check/health
+        # Keeping number of retries higher because sometime Azure Container Instance takes longer to run successfully.
+      - name: 'Verify deployed EDC is healthy'
+        run: curl --retry 20 --retry-all-errors --fail http://${EDC_HOST}:8181/api/check/health
 
       - name: 'Seed data'
         run: |
