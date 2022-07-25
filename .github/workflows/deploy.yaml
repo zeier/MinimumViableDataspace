@@ -263,6 +263,7 @@ jobs:
       company3_assets_storage_account: ${{ steps.runterraform.outputs.company3_assets_storage_account }}
 
     strategy:
+      max-parallel: 1
       matrix: ${{ fromJson(needs.Matrix.outputs.matrix) }}
 
     defaults:
