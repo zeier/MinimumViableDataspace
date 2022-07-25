@@ -104,11 +104,11 @@ jobs:
     env:
       ACR_NAME: ${{ secrets.ACR_NAME }}
     steps:
-      - name: Checkout DataDashboard
+      - name: Checkout EDCDataDashboard
         uses: actions/checkout@v2
         with:
-          repository: eclipse-dataspaceconnector/DataDashboard
-          ref: 6ce10c61d1333e2857b4921d3f02ffb69b4064b7
+          repository: agera-edc/EDCDataDashboard
+          ref: 6657d71bca844e0c2fc0a01081b8fd97628d522f
 
       - name: 'Az CLI login'
         uses: azure/login@v1
@@ -125,12 +125,10 @@ jobs:
         run: az acr build --registry $ACR_NAME --image mvd/data-dashboard:${{ env.RESOURCES_PREFIX }} .
 
   # Deploy shared dataspace components.
-  # Explicitly running on ubuntu 22.04 as current ubuntu-latest is on 20.04 version which comes with curl version 7.68.0
-  # but to support --retry-all-errors flag at least curl version 7.71.0 is required which is available with ubuntu 22.04
   Deploy-Dataspace:
     needs:
       - Build-Registration-Service
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       app_insights_connection_string: ${{ steps.runterraform.outputs.app_insights_connection_string }}
       registration_service_url: ${{ steps.runterraform.outputs.registration_service_url }}
@@ -142,15 +140,11 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: 'Generate GAIA-X Authority key'
-        uses: ./.github/actions/generate-key
-        with:
-          keyFileNamePrefix: gaiaxkey
-
-      - name: 'Generate Dataspace Authority key'
-        uses: ./.github/actions/generate-key
-        with:
-          keyFileNamePrefix: authoritykey
+      - name: 'Generate key'
+        run: |
+          openssl ecparam -name prime256v1 -genkey -noout -out key.pem
+          openssl ec -in key.pem -pubout -out key.public.pem
+          docker run -i danedmunds/pem-to-jwk:1.2.1 --public --pretty < key.public.pem > key.public.jwk
 
       - name: 'Create tfvars file'
         run: |
@@ -159,7 +153,7 @@ jobs:
           acr_name = "${{ secrets.ACR_NAME }}"
           prefix = "${{ env.RESOURCES_PREFIX }}"
           resource_group = "rg-${{ env.RESOURCES_PREFIX }}"
-          registrationservice_runtime_image = "mvd/registration-service:${{ env.RESOURCES_PREFIX }}"
+          registry_runtime_image = "mvd/registration-service:${{ env.RESOURCES_PREFIX }}"
           application_sp_object_id = "${{ secrets.APP_OBJECT_ID }}"
           EOF
 
@@ -185,18 +179,12 @@ jobs:
           ' >> backend.conf
           terraform init -backend-config=backend.conf
           terraform apply -auto-approve
-          connector_name=$(terraform output -raw connector_name)
-          echo "::set-output name=connector_name::${connector_name}"
-          key_vault=$(terraform output -raw key_vault)
-          echo "::set-output name=key_vault::${key_vault}"
           app_insights_connection_string=$(terraform output -raw app_insights_connection_string)
           echo "::set-output name=app_insights_connection_string::${app_insights_connection_string}"
           registration_service_url=$(terraform output -raw registration_service_url)
           echo "::set-output name=registration_service_url::${registration_service_url}"
-          dataspace_did_host=$(terraform output -raw dataspace_did_host)
-          echo "::set-output name=dataspace_did_host::${dataspace_did_host}"
-          gaiax_did_host=$(terraform output -raw gaiax_did_host)
-          echo "::set-output name=gaiax_did_host::${gaiax_did_host}"
+          did_host=$(terraform output -raw did_host)
+          echo "::set-output name=did_host::${did_host}"
 
         env:
           # Authentication settings for Terraform AzureRM provider
@@ -206,42 +194,23 @@ jobs:
           ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
           # Terraform variables not included in terraform.tfvars.
-          TF_VAR_public_key_jwk_file_authority: "authoritykey.public.jwk"
-          TF_VAR_public_key_jwk_file_gaiax: "gaiaxkey.public.jwk"
+          TF_VAR_key_file: "key.pem"
+          TF_VAR_public_key_jwk_file: "key.public.jwk"
 
-      - name: 'Az CLI re-login (refresh role assignments)'
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.ARM_CLIENT_ID }}
-          tenant-id: ${{ secrets.ARM_TENANT_ID }}
-          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      - name: 'Verify did endpoint is available'
+        run: curl https://${{ steps.runterraform.outputs.did_host }}/.well-known/did.json | jq '.id'
 
-      - name: 'Upload private key as vault secret'
-        run: az keyvault secret set --name "$name" --vault-name "$vault" --file authoritykey.pem -o none
-        env:
-          name: ${{ steps.runterraform.outputs.connector_name }}
-          vault: ${{ steps.runterraform.outputs.key_vault }}
-
-      - name: 'Verify GAIA-X Authority DID endpoint is available'
-        run: curl https://${{ steps.runterraform.outputs.gaiax_did_host }}/.well-known/did.json | jq '.id'
-
-      - name: 'Verify Dataspace DID endpoint is available'
-        run: curl https://${{ steps.runterraform.outputs.dataspace_did_host }}/.well-known/did.json | jq '.id'
-
-        # Keeping number of retries higher because sometime Azure Container Instance takes longer to run successfully.
-      - name: 'Verify deployed Registration Service is healthy'
-        run: curl --retry 20 --retry-all-errors --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
+      - name: 'Verify deployed Registry Service is healthy'
+        run: curl --retry 6 --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
 
   # Deploy dataspace participants in parallel.
-  # Explicitly running on ubuntu 22.04 as current ubuntu-latest is on 20.04 version which comes with curl version 7.68.0
-  # but to support --retry-all-errors flag at least curl version 7.71.0 is required which is available with ubuntu 22.04
   Deploy-Participants:
     needs:
       - Deploy-Dataspace
       - Build-Connector
       - Build-Dashboard
       - Matrix
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       company1_edc_host: ${{ steps.runterraform.outputs.company1_edc_host }}
       company2_edc_host: ${{ steps.runterraform.outputs.company2_edc_host }}
@@ -263,7 +232,6 @@ jobs:
       company3_assets_storage_account: ${{ steps.runterraform.outputs.company3_assets_storage_account }}
 
     strategy:
-      max-parallel: 1
       matrix: ${{ fromJson(needs.Matrix.outputs.matrix) }}
 
     defaults:
@@ -272,13 +240,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-      - uses: ./.github/actions/gradle-setup
 
-      - name: 'Generate Participant key'
-        uses: ./.github/actions/generate-key
-        with:
-          keyFileNamePrefix: key
-          directory: deployment/terraform/participant
+      - name: 'Generate key'
+        run: |
+          openssl ecparam -name prime256v1 -genkey -noout -out key.pem
+          openssl ec -in key.pem -pubout -out key.public.pem
+          docker run -i danedmunds/pem-to-jwk:1.2.1 --public --pretty < key.public.pem > key.public.jwk
 
       - name: 'Create tfvars file'
         run: |
@@ -323,22 +290,14 @@ jobs:
           DID_HOST=$(terraform output -raw did_host)
           EDC_HOST=$(terraform output -raw edc_host)
           ASSETS_STORAGE_ACCOUNT=$(terraform output -raw assets_storage_account)
-          ASSETS_STORAGE_ACCOUNT_KEY=$(terraform output -raw assets_storage_account_key)
-          INBOX_STORAGE_ACCOUNT=$(terraform output -raw inbox_storage_account)
-          INBOX_STORAGE_ACCOUNT_KEY=$(terraform output -raw inbox_storage_account_key)
           KEY_VAULT=$(terraform output -raw key_vault)
           WEBAPP_URL=$(terraform output -raw webapp_url)
           API_KEY=$(terraform output -raw api_key)
           echo "::notice title=MVD WebApp for ${{ matrix.participant }}::$WEBAPP_URL"
           echo "ASSETS_STORAGE_ACCOUNT=$ASSETS_STORAGE_ACCOUNT" >> $GITHUB_ENV
-          echo "ASSETS_STORAGE_ACCOUNT_KEY=$ASSETS_STORAGE_ACCOUNT_KEY" >> $GITHUB_ENV
-          echo "INBOX_STORAGE_ACCOUNT=$INBOX_STORAGE_ACCOUNT" >> $GITHUB_ENV
-          echo "INBOX_STORAGE_ACCOUNT_KEY=$INBOX_STORAGE_ACCOUNT_KEY" >> $GITHUB_ENV
           echo "DID_HOST=$DID_HOST" >> $GITHUB_ENV
           echo "EDC_HOST=$EDC_HOST" >> $GITHUB_ENV
           echo "API_KEY=$API_KEY" >> $GITHUB_ENV
-          echo "CONNECTOR_NAME=$CONNECTOR_NAME" >> $GITHUB_ENV
-          echo "KEY_VAULT=$KEY_VAULT" >> $GITHUB_ENV
           echo "::set-output name=${{ matrix.participant }}_edc_host::${EDC_HOST}"
           echo "::set-output name=${{ matrix.participant }}_key_vault::${KEY_VAULT}"
           echo "::set-output name=${{ matrix.participant }}_api_key::${API_KEY}"
@@ -356,32 +315,16 @@ jobs:
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
 
           # Terraform variables not included in terraform.tfvars.
+          TF_VAR_key_file: "key.pem"
           TF_VAR_public_key_jwk_file: "key.public.jwk"
           TF_VAR_application_sp_client_secret: ${{ secrets.APP_CLIENT_SECRET }}
           TF_VAR_app_insights_connection_string: ${{ needs.Deploy-Dataspace.outputs.app_insights_connection_string }}
 
-      - name: 'Az CLI re-login (refresh role assignments)'
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.ARM_CLIENT_ID }}
-          tenant-id: ${{ secrets.ARM_TENANT_ID }}
-          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-
-      - name: 'Upload private key as vault secret'
-        run: az keyvault secret set --name "$CONNECTOR_NAME" --vault-name "$KEY_VAULT" --file key.pem -o none
-
-      - name: 'Upload asset storage account key as vault secret'
-        run: az keyvault secret set --name "$ASSETS_STORAGE_ACCOUNT-key1" --vault-name "$KEY_VAULT" --value "$ASSETS_STORAGE_ACCOUNT_KEY" -o none
-
-      - name: 'Upload inbox storage account key as vault secret'
-        run: az keyvault secret set --name "$INBOX_STORAGE_ACCOUNT-key1" --vault-name "$KEY_VAULT" --value "$INBOX_STORAGE_ACCOUNT_KEY" -o none
-
       - name: 'Verify did endpoint is available'
         run: curl https://$DID_HOST/.well-known/did.json | jq '.id'
 
-        # Keeping number of retries higher because sometime Azure Container Instance takes longer to run successfully.
       - name: 'Verify deployed EDC is healthy'
-        run: curl --retry 20 --retry-all-errors --fail http://${EDC_HOST}:8181/api/check/health
+        run: curl --retry 6 --fail http://${EDC_HOST}:8181/api/check/health
 
       - name: 'Seed data'
         run: |
@@ -391,8 +334,9 @@ jobs:
 
       - name: 'Register participant'
         run: |
-          mvn dependency:copy -Dartifact=org.eclipse.dataspaceconnector.registrationservice:registration-service-cli:1.0.0-SNAPSHOT:jar:all -DoutputDirectory=.
-          java -jar registration-service-cli-1.0.0-SNAPSHOT-all.jar -s=$REGISTRATION_SERVICE_API_URL participants add --request='{ "name": "${{matrix.participant}}", "supportedProtocols": [ "ids-multipart" ], "url": "http://${{ env.EDC_HOST }}:8282" }'
+          curl -vfd '{ "name": "${{matrix.participant}}", "supportedProtocols": [ "ids-multipart" ], "url": "http://${{ env.EDC_HOST }}:8282" }' \
+            -HContent-type:application/json \
+            $REGISTRATION_SERVICE_API_URL/registry/participant
         env:
           REGISTRATION_SERVICE_API_URL: ${{ needs.Deploy-Dataspace.outputs.registration_service_url }}/api
 
@@ -429,4 +373,67 @@ jobs:
           CONSUMER_EU_DID_URL: did:web:${{ needs.Deploy-Participants.outputs.company2_did_host }}
           CONSUMER_US_DID_URL: did:web:${{ needs.Deploy-Participants.outputs.company3_did_host }}
           API_KEY: ${{ needs.Deploy-Participants.outputs.company2_api_key }}
-          TEST_ENVIRONMENT: "cloud"
+
+  # Verify docker-compose setup for local testing
+  VerifyLocalTests:
+    needs:
+      - Deploy-Participants
+      - Deploy-Dataspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: ./.github/actions/gradle-setup
+
+      - name: 'Az CLI login'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: 'Build launcher'
+        run: ./gradlew :launcher:shadowJar
+
+      - name: 'create env file'
+        run: |-
+          cat <<EOF > system-tests/.env
+          CONSUMER_EU_KEY_VAULT=${{ needs.Deploy-Participants.outputs.company2_key_vault }}
+          CONSUMER_US_KEY_VAULT=${{ needs.Deploy-Participants.outputs.company3_key_vault }}
+          PROVIDER_KEY_VAULT=${{ needs.Deploy-Participants.outputs.company1_key_vault }}
+          APP_CLIENT_ID=${{ secrets.APP_CLIENT_ID }}
+          APP_TENANT_ID=${{ secrets.ARM_TENANT_ID }}
+          APP_CLIENT_SECRET=<client secret>
+          PROVIDER_DID_URL=did:web:${{ needs.Deploy-Participants.outputs.company1_did_host }}
+          CONSUMER_EU_DID_URL=did:web:${{ needs.Deploy-Participants.outputs.company2_did_host }}
+          CONSUMER_US_DID_URL=did:web:${{ needs.Deploy-Participants.outputs.company3_did_host }}
+          PROVIDER_CONNECTOR_NAME=${{ needs.Deploy-Participants.outputs.company1_connector_name }}
+          CONSUMER_EU_CONNECTOR_NAME=${{ needs.Deploy-Participants.outputs.company2_connector_name }}
+          CONSUMER_US_CONNECTOR_NAME=${{ needs.Deploy-Participants.outputs.company3_connector_name }}
+          PROVIDER_ASSETS_STORAGE_ACCOUNT=${{ needs.Deploy-Participants.outputs.company1_assets_storage_account }}
+          REGISTRATION_SERVICE_URL=${{ needs.Deploy-Dataspace.outputs.registration_service_url }}
+          EOF
+
+      - name: 'Publish env file'
+        uses: actions/upload-artifact@v3
+        with:
+          name: testing-configuration
+          path: system-tests/.env
+
+      - name: 'Run EDC instances in docker-compose'
+        run: docker-compose -f system-tests/docker-compose.yml up --build --detach
+        timeout-minutes: 10
+        env:
+          APP_CLIENT_SECRET: ${{ secrets.APP_CLIENT_SECRET }}
+
+      - name: 'Unit and system tests'
+        run: ./gradlew test
+        timeout-minutes: 10
+        env:
+          CONSUMER_EU_KEY_VAULT: ${{ needs.Deploy-Participants.outputs.company2_key_vault }}
+          CONSUMER_US_KEY_VAULT: ${{ needs.Deploy-Participants.outputs.company3_key_vault }}
+
+      - name: 'docker-compose logs'
+        run: docker-compose -f system-tests/docker-compose.yml logs
+        if: always()
+
