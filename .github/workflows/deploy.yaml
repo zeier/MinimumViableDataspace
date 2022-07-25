@@ -197,11 +197,18 @@ jobs:
           TF_VAR_key_file: "key.pem"
           TF_VAR_public_key_jwk_file: "key.public.jwk"
 
+      # To support --retry-all-errors flag at least curl version 7.71.0 is required.
+      - name: 'Upgrade Curl'
+        run: sudo -E bash deployment/curl-upgrade.sh
+        working-directory: .
+        env:
+          VERSION: 7.84.0
+
       - name: 'Verify did endpoint is available'
         run: curl https://${{ steps.runterraform.outputs.did_host }}/.well-known/did.json | jq '.id'
 
       - name: 'Verify deployed Registry Service is healthy'
-        run: curl --retry 6 --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
+        run: curl --retry 10 --retry-all-errors --fail ${{ steps.runterraform.outputs.registration_service_url }}/api/check/health
 
   # Deploy dataspace participants in parallel.
   Deploy-Participants:
@@ -232,6 +239,7 @@ jobs:
       company3_assets_storage_account: ${{ steps.runterraform.outputs.company3_assets_storage_account }}
 
     strategy:
+      max-parallel: 1
       matrix: ${{ fromJson(needs.Matrix.outputs.matrix) }}
 
     defaults:
@@ -320,11 +328,18 @@ jobs:
           TF_VAR_application_sp_client_secret: ${{ secrets.APP_CLIENT_SECRET }}
           TF_VAR_app_insights_connection_string: ${{ needs.Deploy-Dataspace.outputs.app_insights_connection_string }}
 
+      # To support --retry-all-errors flag at least curl version 7.71.0 is required.
+      - name: 'Upgrade Curl'
+        run: sudo -E bash deployment/curl-upgrade.sh
+        working-directory: .
+        env:
+          VERSION: 7.84.0
+
       - name: 'Verify did endpoint is available'
         run: curl https://$DID_HOST/.well-known/did.json | jq '.id'
 
       - name: 'Verify deployed EDC is healthy'
-        run: curl --retry 6 --fail http://${EDC_HOST}:8181/api/check/health
+        run: curl --retry 10 --retry-all-errors --fail http://${EDC_HOST}:8181/api/check/health
 
       - name: 'Seed data'
         run: |
